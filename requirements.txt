@@ -1,0 +1,10 @@
+pandas
+numpy
+scikit-learn
+nltk
+yake
+rake-nltk
+keybert
+sentence-transformers
+torch
+transformers
