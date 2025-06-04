@@ -2,6 +2,7 @@ from keybert import KeyBERT
 from sentence_transformers import SentenceTransformer
 from typing import List, Tuple
 import re
+from collections import Counter
 
 class KeyBERTKeywordExtractor:
     def __init__(self, model_name: str = 'all-MiniLM-L6-v2'):
@@ -19,14 +20,12 @@ class KeyBERTKeywordExtractor:
         """KeyBERT 모델 초기화"""
         try:
             print(f"KeyBERT 모델 로딩 중: {self.model_name}")
-            # CPU에서 사용할 수 있는 경량 모델 사용
             sentence_model = SentenceTransformer(self.model_name)
             self.kw_model = KeyBERT(model=sentence_model)
             print("KeyBERT 모델 로딩 완료")
             
         except Exception as e:
             print(f"KeyBERT 모델 초기화 중 오류: {e}")
-            print("기본 모델로 재시도...")
             try:
                 self.kw_model = KeyBERT()
                 print("기본 KeyBERT 모델 로딩 완료")
@@ -39,75 +38,152 @@ class KeyBERTKeywordExtractor:
         if not isinstance(text, str):
             return ""
         
-        # 다중 공백을 단일 공백으로
         text = re.sub(r'\s+', ' ', text.strip())
-        
         return text
     
-    def extract_keywords(self, document: str, n_keywords: int = 5) -> List[Tuple[str, float]]:
-        """
-        KeyBERT를 사용한 키워드 추출
+    def _is_good_keyword(self, keyword: str) -> bool:
+        """좋은 키워드인지 판단"""
+        keyword = keyword.lower().strip()
         
-        Args:
-            document: 입력 문서
-            n_keywords: 추출할 키워드 수
+        # 최소 길이
+        if len(keyword) < 3:
+            return False
+        
+        # 숫자만 있으면 안됨
+        if keyword.isdigit():
+            return False
+        
+        # 명백한 불용어
+        bad_words = {
+            'say', 'said', 'told', 'tell', 'huffpost', 'post', 'draw', 
+            'according', 'former', 'also', 'even', 'still', 'just',
+            'one', 'two', 'new', 'old', 'time', 'year', 'day'
+        }
+        
+        if keyword in bad_words:
+            return False
+        
+        # 불용어가 포함된 구문
+        if any(bad in keyword for bad in bad_words):
+            return False
+        
+        # 사람 이름은 제외 (두 단어가 모두 대문자로 시작)
+        words = keyword.split()
+        if len(words) == 2 and all(word[0].isupper() and word[1:].islower() for word in words):
+            return False
+        
+        return True
+    
+    def _extract_simple_keywords(self, document: str, n_keywords: int) -> List[Tuple[str, float]]:
+        """간단하고 효과적인 키워드 추출"""
+        try:
+            # 기본 추출 - 많이 뽑아서 필터링
+            keywords = self.kw_model.extract_keywords(
+                document,
+                keyphrase_ngram_range=(1, 2),  # 1-2 단어
+                stop_words='english'
+            )
             
-        Returns:
-            (키워드, 점수) 튜플 리스트
-        """
+            # 상위 50개 정도 가져옴
+            candidates = keywords[:50] if len(keywords) >= 50 else keywords
+            
+            # 품질 필터링
+            good_keywords = []
+            used_words = set()
+            
+            for keyword, score in candidates:
+                if self._is_good_keyword(keyword):
+                    # 중복 단어 체크
+                    keyword_words = set(keyword.lower().split())
+                    
+                    # 이미 사용된 단어와 겹치지 않으면 추가
+                    if not keyword_words.intersection(used_words):
+                        good_keywords.append((keyword, score))
+                        used_words.update(keyword_words)
+                        
+                        if len(good_keywords) >= n_keywords:
+                            break
+            
+            return good_keywords
+            
+        except Exception as e:
+            print(f"KeyBERT 기본 추출 실패: {e}")
+            return []
+    
+    def _extract_with_mmr(self, document: str, n_keywords: int) -> List[Tuple[str, float]]:
+        """MMR을 사용한 다양성 추출"""
+        try:
+            keywords = self.kw_model.extract_keywords(
+                document,
+                keyphrase_ngram_range=(1, 2),
+                stop_words='english',
+                use_mmr=True,
+                diversity=0.8
+            )
+            
+            # 필터링
+            good_keywords = []
+            for keyword, score in keywords[:20]:
+                if self._is_good_keyword(keyword):
+                    good_keywords.append((keyword, score))
+                    if len(good_keywords) >= n_keywords:
+                        break
+            
+            return good_keywords
+            
+        except Exception as e:
+            print(f"KeyBERT MMR 추출 실패: {e}")
+            return []
+    
+    def _get_top_words_from_text(self, document: str, n_keywords: int) -> List[Tuple[str, float]]:
+        """텍스트에서 직접 중요 단어 추출 (fallback)"""
+        # 간단한 단어 빈도 기반 추출
+        words = re.findall(r'\b[a-zA-Z]{4,}\b', document.lower())
+        
+        # 불용어 제거
+        stop_words = {
+            'said', 'told', 'huffpost', 'according', 'former', 'also', 'even',
+            'still', 'just', 'with', 'from', 'they', 'have', 'this', 'that',
+            'were', 'been', 'their', 'would', 'could', 'should', 'about'
+        }
+        
+        filtered_words = [word for word in words if word not in stop_words and len(word) >= 4]
+        
+        # 빈도 계산
+        word_counts = Counter(filtered_words)
+        
+        # 상위 키워드 반환
+        top_words = word_counts.most_common(n_keywords)
+        return [(word, float(count)) for word, count in top_words]
+    
+    def extract_keywords(self, document: str, n_keywords: int = 5) -> List[Tuple[str, float]]:
+        """KeyBERT를 사용한 키워드 추출"""
         if self.kw_model is None:
             print("KeyBERT 모델이 초기화되지 않았습니다.")
-            return []
+            # 모델이 없으면 fallback 사용
+            return self._get_top_words_from_text(document, n_keywords)
         
-        # 전처리
         processed_doc = self._preprocess_text(document)
         
         if not processed_doc.strip():
             return []
         
-        try:
-            # KeyBERT 키워드 추출 (기본 매개변수만 사용)
-            keywords = self.kw_model.extract_keywords(
-                processed_doc,
-                keyphrase_ngram_range=(1, 2),  # unigram과 bigram
-                stop_words='english'
-            )
-            
-            # 상위 n_keywords개만 선택
-            keywords = keywords[:n_keywords]
-            
-            # 결과 필터링
-            filtered_keywords = []
-            seen_keywords = set()
-            
-            for keyword, score in keywords:
-                clean_keyword = keyword.strip().lower()
-                
-                # 중복 체크 및 품질 체크
-                if (clean_keyword not in seen_keywords and 
-                    len(clean_keyword) > 2 and 
-                    not clean_keyword.isdigit()):
-                    
-                    filtered_keywords.append((keyword, score))
-                    seen_keywords.add(clean_keyword)
-            
-            return filtered_keywords
-            
-        except Exception as e:
-            print(f"KeyBERT 키워드 추출 중 오류: {e}")
-            return []
+        # 방법 1: MMR 시도
+        keywords = self._extract_with_mmr(processed_doc, n_keywords)
+        if len(keywords) >= n_keywords:
+            return keywords
+        
+        # 방법 2: 간단한 방법 시도
+        keywords = self._extract_simple_keywords(processed_doc, n_keywords)
+        if len(keywords) >= n_keywords:
+            return keywords
+        
+        # 방법 3: fallback - 단어 빈도 기반
+        print("KeyBERT 방법들이 실패, 단어 빈도 기반으로 대체")
+        return self._get_top_words_from_text(processed_doc, n_keywords)
     
     def get_keywords_only(self, document: str, n_keywords: int = 5) -> List[str]:
-        """
-        키워드만 반환 (점수 제외)
-        
-        Args:
-            document: 입력 문서
-            n_keywords: 추출할 키워드 수
-            
-        Returns:
-            키워드 리스트
-        """
+        """키워드만 반환 (점수 제외)"""
         keyword_scores = self.extract_keywords(document, n_keywords)
         return [keyword for keyword, score in keyword_scores]
 
