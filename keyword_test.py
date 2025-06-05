@@ -34,8 +34,8 @@ class KeywordExtractorTester:
         print(f"\n{'='*80}")
         print(f"문서 인덱스: {doc_index}")
         print(f"{'='*80}")
-        print(f"문서 내용 (처음 200자):")
-        print(f"{document[:200]}...")
+        print(f"문서 내용:")
+        print(f"{document}")
         print(f"\n{'-'*80}")
         
         # 각 모델별 키워드 추출 및 시간 측정
